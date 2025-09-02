@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Norway National Parks — GeoJSON → SVG</title>
+  <style>
+    :root{
+      --bg:#f8f9fb;
+      --coast:#d8dee9;
+      --park:#b0b7c3;
+      --park-active:#2bb673;
+      --label:#6b7280;
+      --label-active:#1f2937;
+      --stroke:#9aa4b2;
+    }
+    html, body {height:100%;}
+    body {
+      margin:0; font-family:system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      background:var(--bg); color:#0f172a; display:grid; grid-template-rows:auto 1fr;
+    }
+    header { padding:12px 16px; border-bottom:1px solid #e5e7eb; background:#fff; display:flex; gap:12px; align-items:center; }
+    header h1 { font-size:clamp(16px,2.2vw,20px); margin:0; font-weight:650; }
+    .toolbar { margin-left:auto; display:flex; gap:8px; }
+    button{ appearance:none; border:1px solid #e5e7eb; background:#fff; padding:8px 10px; border-radius:10px; cursor:pointer }
+    .map-wrap{ position:relative; overflow:hidden; background:#e9eef5; }
+    svg{ display:block; width:100%; height:100%; }
+    .coast { fill: var(--coast); stroke: #c3c9d3; stroke-width: 0.5; }
+    .park  { fill: var(--park);  stroke: var(--stroke); stroke-width: 0.7; cursor:pointer; transition: fill .15s ease; }
+    .park.active { fill: var(--park-active); }
+    .label { font-size: 10px; fill: var(--label); pointer-events: none; transition: font-weight .15s ease, fill .15s ease; }
+    .label.active { font-weight: 700; fill: var(--label-active); }
+    @media (max-width: 480px){ .label{ font-size: 9px; } }
+    .park:focus { outline: none; filter: drop-shadow(0 0 0.6px #1118); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Norway National Parks — GeoJSON</h1>
+    <div class="toolbar">
+      <button id="resetBtn" title="Reset zoom">Reset</button>
+    </div>
+  </header>
+  <div class="map-wrap">
+    <svg id="map" viewBox="0 0 1000 1600" role="img" aria-label="Interactive map of Norway with national parks (GeoJSON)">
+      <g id="viewport">
+        <g id="background"></g>
+        <g id="parks"></g>
+        <g id="labels" aria-hidden="true"></g>
+      </g>
+    </svg>
+  </div>
+
+  <script src="https://unpkg.com/d3@7/dist/d3.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script>
+  (async function(){
+    const svg = d3.select('#map');
+    const viewport = d3.select('#viewport');
+    const gCoast = d3.select('#background');
+    const gParks = d3.select('#parks');
+    const gLabels = d3.select('#labels');
+    const resetBtn = document.getElementById('resetBtn');
+
+    // Load GeoJSON (served from ./data/)
+    let parks, coast;
+    try{
+      [parks, coast] = await Promise.all([
+        d3.json('data/national_parks.geojson'),
+        d3.json('data/basemap.geojson')
+      ]);
+    } catch (e){
+      console.error('Failed to load GeoJSON files:', e);
+      alert('Could not load GeoJSON. Use a local server (or GitHub Pages).');
+      return;
+    }
+
+    if(!parks || !parks.features || !coast || !coast.features){
+      alert('Invalid GeoJSON format. Expected FeatureCollection with a features array.');
+      return;
+    }
+
+    const vb = svg.attr('viewBox').split(' ').map(Number);
+    const w = vb[2], h = vb[3];
+
+    const projection = d3.geoMercator();
+    const path = d3.geoPath(projection);
+
+    const combined = { type: 'FeatureCollection', features: [...coast.features, ...parks.features] };
+    projection.fitSize([w, h], combined);
+
+    // Coastline
+    gCoast.selectAll('path')
+      .data(coast.features)
+      .enter().append('path')
+      .attr('class', 'coast')
+      .attr('d', path);
+
+    // Helper: robust name getter
+    const getName = (f) => {
+      try {
+        return f.properties?.get('navn') || f.properties?.name || f.properties?.Name || f.properties?.NAME || f.properties?.navn || f.properties?.NAVN || f.properties?.park_name || f.properties?.ParkName || f.properties?.PARK_NAME || f.properties?.NP_NAME || f.properties?.park || f.properties?.PARK || f.properties?.omrade_navn || f.properties?.område_navn || f.properties?.områdeNavn || f.properties?.title || f.properties?.Title || 'Unknown';
+      } catch(e) {
+        return f.properties && (f.properties.name || f.properties.Name || f.properties.NAVN) || 'Unknown';
+      }
+    };
+
+    // Slug for ids
+    const slug = (s) => String(s || 'unknown')
+      .toLowerCase()
+      .normalize('NFD').replace(/\p{Diacritic}/gu,'')
+      .replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'');
+
+    // Parks
+    const parkData = parks.features.map((f, i) => ({...f, __id: slug(getName(f)) || 'park-' + i}));
+
+    const parkSel = gParks.selectAll('path')
+      .data(parkData)
+      .enter().append('path')
+      .attr('class', 'park')
+      .attr('id', d => `park-${d.__id}`)
+      .attr('tabindex', 0)
+      .attr('role', 'button')
+      .attr('data-name', d => getName(d))
+      .attr('data-label-id', d => `label-${d.__id}`)
+      .attr('d', d => path(d));
+
+    // Labels at centroids
+    gLabels.selectAll('text')
+      .data(parkData)
+      .enter().append('text')
+      .attr('class', 'label')
+      .attr('id', d => `label-${d.__id}`)
+      .attr('x', d => path.centroid(d)[0])
+      .attr('y', d => path.centroid(d)[1])
+      .text(d => getName(d));
+
+    function togglePark(el){
+      const park = d3.select(el);
+      const label = d3.select('#' + park.attr('data-label-id'));
+      const isActive = park.classed('active');
+      park.classed('active', !isActive);
+      label.classed('active', !isActive);
+    }
+
+    parkSel.on('click', (event)=> togglePark(event.currentTarget));
+    parkSel.on('keydown', (event)=>{
+      if(event.key === 'Enter' || event.key === ' '){
+        event.preventDefault();
+        togglePark(event.currentTarget);
+      }
+    });
+
+    const zoom = d3.zoom()
+      .scaleExtent([1,4])
+      .on('zoom', (event)=>{ viewport.attr('transform', event.transform); });
+    svg.call(zoom);
+
+    resetBtn.addEventListener('click', ()=>{
+      svg.transition().duration(250).call(zoom.transform, d3.zoomIdentity);
+      d3.selectAll('.park.active').classed('active', false);
+      d3.selectAll('.label.active').classed('active', false);
+    });
+
+    parkSel.on('dblclick', (event)=>{
+      event.preventDefault();
+      const node = event.currentTarget;
+      const bbox = node.getBBox();
+      const svgEl = svg.node();
+      const {width, height} = svgEl.getBoundingClientRect();
+      const scale = Math.min(4, Math.max(1, Math.min(width / (bbox.width * 1.5), height / (bbox.height * 1.5))));
+      const tx = width/2 - scale * (bbox.x + bbox.width/2);
+      const ty = height/2 - scale * (bbox.y + bbox.height/2);
+      const t = d3.zoomIdentity.translate(tx, ty).scale(scale);
+      svg.transition().duration(350).call(zoom.transform, t);
+    });
+  })();
+  </script>
+</body>
+</html>
